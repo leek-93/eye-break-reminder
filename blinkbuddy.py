@@ -711,3 +711,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+#exe 파일 만들기 py -3 -m PyInstaller --onefile --windowed blinkbuddy.py --icon=blinkbuddy.ico
