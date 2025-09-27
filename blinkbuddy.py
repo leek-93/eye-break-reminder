@@ -1,7 +1,7 @@
 # blinkbuddy_tray_i18n.py
 # - English Mode ON: 모든 UI/웰컴/버튼/트레이/상태창 영어
 # - English Mode OFF: 모든 UI 한국어
-import os, json, random, sys, time, platform, threading
+import os, json, random, sys, time, platform, threading, shutil, tempfile, subprocess
 from datetime import datetime, timedelta
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -14,6 +14,15 @@ try:
     TRAY_AVAILABLE = True
 except Exception:
     TRAY_AVAILABLE = False
+
+    
+# ===== OS/Windows helpers =====
+IS_WINDOWS = (platform.system() == "Windows")
+if IS_WINDOWS:
+    try:
+        import winreg  # 표준 라이브러리
+    except Exception:
+        winreg = None
 
 # ===== defaults =====
 REMIND_EVERY_MIN = 20
@@ -76,6 +85,13 @@ I18N = {
         "tray_title_ooh": " — 일시 정지(업무시간 외)",
         "tray_title_next": " — 다음까지 ~{mins}분",
         "msg_wh_disabled": "업무시간 제한을 끄고 항상 작동합니다.",
+        "tray_toggle_startup": "윈도우 시작 시 실행: {onoff}",
+        "msg_startup_on": "Windows 시작 시 자동 실행하도록 설정했습니다.",
+        "msg_startup_off": "Windows 시작 시 자동 실행을 해제했습니다.",
+        "tray_uninstall": "프로그램 삭제(언인스톨)…",
+        "confirm_uninstall": "정말 삭제할까요?\n(시작 등록/설정 파일을 지우고, EXE는 종료 후 삭제됩니다.)",
+        "msg_uninstall_na": "개발 모드(.py)에서는 자체 삭제가 지원되지 않습니다.\n시작 등록/설정만 정리했습니다.",
+        "msg_uninstall_done": "정리 완료. BlinkBuddy가 종료됩니다.",
     },
     "en": {
         "app_name": "BlinkBuddy",
@@ -118,6 +134,13 @@ I18N = {
         "tray_title_ooh": " — Paused (Out of hours)",
         "tray_title_next": " — Next in ~{mins}m",
         "msg_wh_disabled": "Work-hours limit is off. BlinkBuddy will run always.",
+        "tray_toggle_startup": "Start with Windows: {onoff}",
+        "msg_startup_on": "Enabled automatic start with Windows.",
+        "msg_startup_off": "Disabled automatic start with Windows.",
+        "tray_uninstall": "Uninstall…",
+        "confirm_uninstall": "Uninstall BlinkBuddy?\nThis removes startup entry & settings. The EXE will self-delete after exit.",
+        "msg_uninstall_na": "Self-delete is not supported when running from .py (dev mode).\nOnly startup/settings were cleaned.",
+        "msg_uninstall_done": "Cleanup complete. BlinkBuddy will exit.",
     }
 }
 
@@ -206,6 +229,93 @@ def center_window(win, width, height):
     x = (sw // 2) - (width // 2)
     y = (sh // 2) - (height // 2)
     win.geometry(f"{width}x{height}+{x}+{y}")
+
+
+# ===== Windows startup helper =====
+def _get_startup_commandline():
+    if getattr(sys, "frozen", False):
+        # PyInstaller EXE
+        return f'"{sys.executable}"'
+    # .py 실행: pythonw 선호
+    pyw = shutil.which("pythonw.exe") if IS_WINDOWS else None
+    py = pyw or sys.executable
+    script = os.path.abspath(sys.argv[0])
+    return f'"{py}" "{script}"'
+
+def windows_startup_enabled(name="BlinkBuddyApp"):
+    if not IS_WINDOWS:
+        return False
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
+        val, _ = winreg.QueryValueEx(key, name)
+        winreg.CloseKey(key)
+        return bool(val)
+    except Exception:
+        return False
+
+def windows_set_startup(enabled: bool, name="BlinkBuddyApp"):
+    if not IS_WINDOWS:
+        return False
+    import winreg
+    path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE)
+        if enabled:
+            cmd = _get_startup_commandline()
+            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, cmd)
+        else:
+            try:
+                winreg.DeleteValue(key, name)
+            except FileNotFoundError:
+                pass
+        winreg.CloseKey(key)
+        return True
+    except Exception:
+        return False
+
+def uninstall_cleanup_and_selfdelete():
+    """
+    - Remove Windows startup entry
+    - Remove prefs file
+    - If frozen EXE: write a temp .bat to delete the EXE after app exits
+    """
+    # 1) startup off
+    if IS_WINDOWS:
+        try:
+            windows_set_startup(False)
+        except Exception:
+            pass
+    # 2) prefs delete
+    try:
+        if os.path.exists(PREFS_PATH):
+            os.remove(PREFS_PATH)
+    except Exception:
+        pass
+
+    # 3) self delete (EXE only)
+    if getattr(sys, "frozen", False) and IS_WINDOWS:
+        exe = os.path.abspath(sys.executable)
+        bat = os.path.join(tempfile.gettempdir(), f"bb_uninstall_{int(time.time())}.bat")
+        # ping trick to wait ~2s for process exit, then delete exe, then delete the bat itself
+        bat_contents = rf"""@echo off
+ping 127.0.0.1 -n 3 >nul
+del /q "{exe}"
+del /q "%~f0"
+"""
+        try:
+            with open(bat, "w", encoding="utf-8") as f:
+                f.write(bat_contents)
+            creationflags = 0
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                creationflags = subprocess.CREATE_NO_WINDOW
+            subprocess.Popen(["cmd", "/c", bat], creationflags=creationflags, close_fds=True)
+        except Exception:
+            # ignore
+            pass
+        return True
+    return False
 
 class BlinkBuddyApp:
     def __init__(self, root):
@@ -385,9 +495,11 @@ class BlinkBuddyApp:
         next_dt = self._next_alarm_dt()
         mode = t("welcome_mode_work") if WORK_HOURS_ONLY else t("welcome_mode_always")
         paused = time.time() < self.paused_until_ts
+        startup = "ON" if (IS_WINDOWS and windows_startup_enabled()) else "OFF"
         msg = "\n".join([
             t("status_mode", mode=mode),
             t("status_en", onoff=t("on") if EN_MODE else t("off")),
+            f"Start with Windows: {startup}",
             t("status_pause", yesno=t("yes") if paused else t("no")),
             t("status_next", dt=humanize_dt(next_dt)),
         ])
@@ -420,6 +532,12 @@ class BlinkBuddyApp:
             pass
 
     def _init_tray(self):
+        if not TRAY_AVAILABLE:
+            return
+        # 혹시 재호출 되더라도 중복 생성 방지
+        if getattr(self, "tray_icon", None):
+            return
+
         def show_now(icon, item):
             self.root.after(0, lambda: self._show_popup(force=True))
 
@@ -427,7 +545,8 @@ class BlinkBuddyApp:
             self.root.after(0, lambda: (self._schedule_after(SNOOZE_MIN*60), self._on_close_popup()))
 
         def pause_30(icon, item):
-            self.root.after(0, lambda: (setattr(self, "paused_until_ts", time.time()+30*60), self._on_close_popup(), self._update_tray_title()))
+            self.root.after(0, lambda: (setattr(self, "paused_until_ts", time.time()+30*60),
+                                        self._on_close_popup(), self._update_tray_title()))
 
         def toggle_workhours(icon, item):
             def _do():
@@ -443,27 +562,19 @@ class BlinkBuddyApp:
                 global EN_MODE
                 EN_MODE = not EN_MODE
                 save_prefs()
-                # 팝업이 열려 있으면 UI 문구 즉시 갱신
-                try:
-                    if self.popup and self.tip_label:
-                        _, txt = self._random_tip(None)
-                        # 상단 텍스트/버튼/레이블도 갱신
-                        for w in self.popup.winfo_children():
-                            w.destroy()
-                        # 팝업을 다시 그려 가장 간단히 언어 전체 갱신
+                # 팝업이 열려 있으면 언어 반영해서 재그리기
+                if self.popup is not None:
+                    # rebuild=True 버전이 있다면 사용, 없다면 destroy 후 _show_popup(force=True) 호출
+                    try:
+                        self._show_popup(force=True, rebuild=True)
+                    except TypeError:
+                        try:
+                            self.popup.destroy(); self.popup = None
+                        except Exception:
+                            pass
                         self._show_popup(force=True)
-                    # 트레이 라벨/툴팁 갱신
-                    self.tray_icon.menu = pystray.Menu(
-                        pystray.MenuItem(t("tray_show_now"), show_now),
-                        pystray.MenuItem(t("tray_snooze", mins=SNOOZE_MIN), snooze_5),
-                        pystray.MenuItem(t("tray_pause"), pause_30),
-                        pystray.MenuItem(lambda item: t("tray_toggle_en", onoff=t("on") if EN_MODE else t("off")), toggle_en_mode),
-                        pystray.MenuItem(lambda item: t("tray_toggle_wh", onoff=t("on") if WORK_HOURS_ONLY else t("off")), toggle_workhours),
-                        pystray.MenuItem(t("tray_status"), show_status),
-                        pystray.MenuItem(t("tray_quit"), quit_app),
-                    )
-                except Exception:
-                    pass
+                # 트레이 메뉴/툴팁 갱신
+                self._rebuild_tray_menu()
                 self._update_tray_title()
             self.root.after(0, _do)
 
@@ -481,23 +592,95 @@ class BlinkBuddyApp:
                 self.root.after(0, self.root.quit)
             self.root.after(0, _do)
 
+        def toggle_startup(icon, item):
+            if not IS_WINDOWS:
+                return
+            def _do():
+                enabled = windows_startup_enabled()
+                ok = windows_set_startup(not enabled)
+                if ok:
+                    messagebox.showinfo(t("app_name"),
+                                        t("msg_startup_on" if not enabled else "msg_startup_off"))
+                self._rebuild_tray_menu()
+            self.root.after(0, _do)
+
+        def do_uninstall(icon, item):
+            if not IS_WINDOWS:
+                return
+            def _do():
+                if not messagebox.askyesno(t("app_name"), t("confirm_uninstall")):
+                    return
+                self._cleanup_tray_and_quit_for_uninstall()
+            self.root.after(0, _do)
+
+        # 핸들러 저장(메뉴 재구성에서 사용)
+        self._tray_handlers = {
+            "show_now": show_now,
+            "snooze_5": snooze_5,
+            "pause_30": pause_30,
+            "toggle_en_mode": toggle_en_mode,
+            "toggle_workhours": toggle_workhours,
+            "toggle_startup": toggle_startup,
+            "do_uninstall": do_uninstall,
+            "status": lambda i, it: self.root.after(0, self._show_status),
+            "quit": lambda i, it: self.root.after(0, self.root.quit),
+        }
+
         image = self._make_tray_image() if TRAY_AVAILABLE else None
-        self.tray_icon = pystray.Icon(
-            t("app_name"),
-            image,
-            t("app_name"),
-            menu=pystray.Menu(
-                pystray.MenuItem(t("tray_show_now"), show_now),
-                pystray.MenuItem(t("tray_snooze", mins=SNOOZE_MIN), snooze_5),
-                pystray.MenuItem(t("tray_pause"), pause_30),
-                pystray.MenuItem(lambda item: t("tray_toggle_en", onoff=t("on") if EN_MODE else t("off")), toggle_en_mode),
-                pystray.MenuItem(lambda item: t("tray_toggle_wh", onoff=t("on") if WORK_HOURS_ONLY else t("off")), toggle_workhours),
-                pystray.MenuItem(t("tray_status"), show_status),
-                pystray.MenuItem(t("tray_quit"), quit_app),
-            )
-        )
+        self.tray_icon = pystray.Icon(t("app_name"), image, t("app_name"), menu=None)
+
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
+
+        # 타이틀/메뉴 초기 세팅
         self.root.after(300, self._update_tray_title)
+        self.root.after(400, self._rebuild_tray_menu)
+
+
+    def _rebuild_tray_menu(self):
+        # dynamic labels
+        def M(label, cb):
+            return pystray.MenuItem(label, cb)
+
+        items = [
+            M(t("tray_show_now"), self._tray_handlers["show_now"]),
+            M(t("tray_snooze", mins=SNOOZE_MIN), self._tray_handlers["snooze_5"]),
+            M(t("tray_pause"), self._tray_handlers["pause_30"]),
+            M(t("tray_toggle_en", onoff=t("on") if EN_MODE else t("off")), self._tray_handlers["toggle_en_mode"]),
+            M(t("tray_toggle_wh", onoff=t("on") if WORK_HOURS_ONLY else t("off")), self._tray_handlers["toggle_workhours"]),
+        ]
+        if IS_WINDOWS:
+            startup_on = windows_startup_enabled()
+            items.append(M(t("tray_toggle_startup", onoff=t("on") if startup_on else t("off")), self._tray_handlers["toggle_startup"]))
+            items.append(M(t("tray_uninstall"), self._tray_handlers["do_uninstall"]))
+        items.extend([
+            M(t("tray_status"), self._tray_handlers["status"]),
+            M(t("tray_quit"), self._tray_handlers["quit"]),
+        ])
+        try:
+            self.tray_icon.menu = pystray.Menu(*items)
+        except Exception:
+            pass
+
+    def _cleanup_tray_and_quit_for_uninstall(self):
+        # remove startup, prefs; if EXE schedule self-delete
+        self._safe_hide_tray()
+        self.root.after(50, self._do_uninstall_and_exit)
+
+    def _do_uninstall_and_exit(self):
+        self_deleted = uninstall_cleanup_and_selfdelete()
+        if not self_deleted:
+            messagebox.showinfo(t("app_name"), t("msg_uninstall_na"))
+        else:
+            messagebox.showinfo(t("app_name"), t("msg_uninstall_done"))
+        self.root.quit()
+
+    def _safe_hide_tray(self):
+        try:
+            if self.tray_icon is not None:
+                self.tray_icon.visible = False
+                self.tray_icon.stop()
+        except Exception:
+            pass
 
     # -------- loop
     def _tick(self):
