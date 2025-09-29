@@ -1,4 +1,4 @@
-# blinkbuddy_tray_i18n.py
+# blinkbuddy.py
 # - English Mode ON: 모든 UI/웰컴/버튼/트레이/상태창 영어
 # - English Mode OFF: 모든 UI 한국어
 import os, json, random, sys, time, platform, threading, shutil, tempfile, subprocess
@@ -14,7 +14,6 @@ try:
     TRAY_AVAILABLE = True
 except Exception:
     TRAY_AVAILABLE = False
-
     
 # ===== OS/Windows helpers =====
 IS_WINDOWS = (platform.system() == "Windows")
@@ -41,6 +40,18 @@ EN_MODE = False
 
 # prefs path
 PREFS_PATH = os.path.join(os.path.expanduser("~"), ".blinkbuddy.json")
+
+STARTUP_KEY_NAME = "BlinkBuddy"
+
+# --- NEW: Windows single-instance guard (중복 실행 방지) ---
+if IS_WINDOWS:
+    import ctypes
+    _MUTEX_NAME = "Global\\BlinkBuddy_SingleInstance"
+    hMutex = ctypes.windll.kernel32.CreateMutexW(None, True, _MUTEX_NAME)
+    ERROR_ALREADY_EXISTS = 183
+    if hMutex and ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        sys.exit(0)
+# ---------------------------------------------------------------------------
 
 # ===== i18n strings =====
 I18N = {
@@ -91,7 +102,7 @@ I18N = {
         "tray_uninstall": "프로그램 삭제(언인스톨)…",
         "confirm_uninstall": "정말 삭제할까요?\n(시작 등록/설정 파일을 지우고, EXE는 종료 후 삭제됩니다.)",
         "msg_uninstall_na": "개발 모드(.py)에서는 자체 삭제가 지원되지 않습니다.\n시작 등록/설정만 정리했습니다.",
-        "msg_uninstall_done": "정리 완료. BlinkBuddy가 종료됩니다.",
+        "msg_uninstall_done": "정리 완료. 다음 윈도우 부팅 시 BlinkBuddy가 종료됩니다.",
     },
     "en": {
         "app_name": "BlinkBuddy",
@@ -140,7 +151,7 @@ I18N = {
         "tray_uninstall": "Uninstall…",
         "confirm_uninstall": "Uninstall BlinkBuddy?\nThis removes startup entry & settings. The EXE will self-delete after exit.",
         "msg_uninstall_na": "Self-delete is not supported when running from .py (dev mode).\nOnly startup/settings were cleaned.",
-        "msg_uninstall_done": "Cleanup complete. BlinkBuddy will exit.",
+        "msg_uninstall_done": "Cleanup complete. BlinkBuddy will e removed on the next Windows boot.",
     }
 }
 
@@ -230,22 +241,20 @@ def center_window(win, width, height):
     y = (sh // 2) - (height // 2)
     win.geometry(f"{width}x{height}+{x}+{y}")
 
-
 # ===== Windows startup helper =====
 def _get_startup_commandline():
     if getattr(sys, "frozen", False):
-        # PyInstaller EXE
         return f'"{sys.executable}"'
-    # .py 실행: pythonw 선호
     pyw = shutil.which("pythonw.exe") if IS_WINDOWS else None
     py = pyw or sys.executable
     script = os.path.abspath(sys.argv[0])
     return f'"{py}" "{script}"'
 
-def windows_startup_enabled(name="BlinkBuddyApp"):
+def windows_startup_enabled(name: str | None = None):
     if not IS_WINDOWS:
         return False
     import winreg
+    name = name or STARTUP_KEY_NAME  # <-- 통일
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
@@ -255,10 +264,11 @@ def windows_startup_enabled(name="BlinkBuddyApp"):
     except Exception:
         return False
 
-def windows_set_startup(enabled: bool, name="BlinkBuddyApp"):
+def windows_set_startup(enabled: bool, name: str | None = None):
     if not IS_WINDOWS:
         return False
     import winreg
+    name = name or STARTUP_KEY_NAME  # <-- 통일
     path = r"Software\Microsoft\Windows\CurrentVersion\Run"
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE)
@@ -275,11 +285,12 @@ def windows_set_startup(enabled: bool, name="BlinkBuddyApp"):
     except Exception:
         return False
 
+
 def uninstall_cleanup_and_selfdelete():
     """
     - Remove Windows startup entry
     - Remove prefs file
-    - If frozen EXE: write a temp .bat to delete the EXE after app exits
+    - If frozen EXE: schedule delete on reboot (no cmd/bat)
     """
     # 1) startup off
     if IS_WINDOWS:
@@ -287,6 +298,7 @@ def uninstall_cleanup_and_selfdelete():
             windows_set_startup(False)
         except Exception:
             pass
+
     # 2) prefs delete
     try:
         if os.path.exists(PREFS_PATH):
@@ -294,28 +306,17 @@ def uninstall_cleanup_and_selfdelete():
     except Exception:
         pass
 
-    # 3) self delete (EXE only)
+    # 3) schedule self-delete on reboot (EXE only, no cmd/bat)
     if getattr(sys, "frozen", False) and IS_WINDOWS:
-        exe = os.path.abspath(sys.executable)
-        bat = os.path.join(tempfile.gettempdir(), f"bb_uninstall_{int(time.time())}.bat")
-        # ping trick to wait ~2s for process exit, then delete exe, then delete the bat itself
-        bat_contents = rf"""@echo off
-ping 127.0.0.1 -n 3 >nul
-del /q "{exe}"
-del /q "%~f0"
-"""
+        import ctypes
+        MOVEFILE_DELAY_UNTIL_REBOOT = 0x4
         try:
-            with open(bat, "w", encoding="utf-8") as f:
-                f.write(bat_contents)
-            creationflags = 0
-            if hasattr(subprocess, "CREATE_NO_WINDOW"):
-                creationflags = subprocess.CREATE_NO_WINDOW
-            subprocess.Popen(["cmd", "/c", bat], creationflags=creationflags, close_fds=True)
+            ctypes.windll.kernel32.MoveFileExW(sys.executable, None, MOVEFILE_DELAY_UNTIL_REBOOT)
+            return True  # 삭제가 부팅 시 예약됨
         except Exception:
-            # ignore
-            pass
-        return True
+            return False
     return False
+
 
 class BlinkBuddyApp:
     def __init__(self, root):
@@ -380,7 +381,8 @@ class BlinkBuddyApp:
         except Exception:
             pass
 
-    def _show_popup(self, force=False):
+    def _show_popup(self, force: bool = False, rebuild: bool = False):
+        # force가 아니면 업무시간/일시정지 검사
         if not force:
             if WORK_HOURS_ONLY and not is_within_work_hours(datetime.now()):
                 self.next_due_ts = self._compute_next_due()
@@ -388,9 +390,14 @@ class BlinkBuddyApp:
             if time.time() < self.paused_until_ts:
                 return
 
+        # 이미 떠 있으면
         if self.popup is not None:
             try:
-                self.popup.lift(); self.popup.focus_force(); return
+                if rebuild:
+                    self.popup.destroy()
+                    self.popup = None
+                else:
+                    self.popup.lift(); self.popup.focus_force(); return
             except tk.TclError:
                 self.popup = None
 
@@ -562,17 +569,9 @@ class BlinkBuddyApp:
                 global EN_MODE
                 EN_MODE = not EN_MODE
                 save_prefs()
-                # 팝업이 열려 있으면 언어 반영해서 재그리기
+                # 팝업이 열려 있으면 언어 반영하여 '완전 재빌드'
                 if self.popup is not None:
-                    # rebuild=True 버전이 있다면 사용, 없다면 destroy 후 _show_popup(force=True) 호출
-                    try:
-                        self._show_popup(force=True, rebuild=True)
-                    except TypeError:
-                        try:
-                            self.popup.destroy(); self.popup = None
-                        except Exception:
-                            pass
-                        self._show_popup(force=True)
+                    self._show_popup(force=True, rebuild=True)
                 # 트레이 메뉴/툴팁 갱신
                 self._rebuild_tray_menu()
                 self._update_tray_title()
@@ -712,4 +711,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-#exe 파일 만들기 py -3 -m PyInstaller --onefile --windowed blinkbuddy.py --icon=blinkbuddy.ico
+#exe 파일 만들기 py -3 -m PyInstaller --onefile --windowed --clean --noupx --name BlinkBuddy --icon blinkbuddy.ico blinkbuddy.py
