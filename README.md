@@ -48,7 +48,7 @@ A lightweight desktop tray application that helps reduce eye strain by reminding
 
 Popup reminder every 20 minutes with rotating eye-care tips. Status window showing mode, language, startup option, and next reminder.
 
-<img width="1107" height="446" alt="Image" src="https://github.com/user-attachments/assets/ 55fc0301-fe8b-4521-b736-cee4a54a00ad" />
+<img width="1107" height="446" alt="Image" src="https://github.com/user-attachments/assets/1f98aed8-8b03-49ad-adb1-7078f09cd4c5" />
 
 Quick tray menu (Korean UI) with snooze, pause, language toggle, and startup options. Bilingual support – English UI for international users.
 
